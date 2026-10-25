@@ -20,12 +20,13 @@
 // Environment:
 //   MAGPIE_LAYERFS_BACKEND  auto (default) | sim — "native" is an
 //                           explicit error in this package (above)
-//   MAGPIE_LAYERFS_HOME     state root (default ~/.magpie-layerfs)
+//   MAGPIE_LAYERFS_HOME     state root (default ~/.layerfs-tools; see
+//                           defaultRoot below)
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import {
-  chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync,
-  realpathSync, statSync, writeFileSync,
+  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync,
+  realpathSync, renameSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join, parse, resolve, sep } from "node:path"
@@ -321,13 +322,43 @@ function runShell(command, dir, timeoutMs) {
   })
 }
 
+// ---- the default state root ------------------------------------------------------
+// The state root when MAGPIE_LAYERFS_HOME is unset. provision, resolve
+// and exec answer workspace paths under it, and a tool result goes to
+// the vendor in the agent's next request, so the default names neither
+// the app nor the host (#360). A root made by 0.7.2 or earlier
+// (~/.magpie-layerfs) is moved once to the new name, and a link is left
+// at the old path so a session still holding an old workspace path keeps
+// working. A legacy root that is itself a link (the user pointed it
+// somewhere) is the user's own setup and is used where it is; so is a
+// legacy root the move fails on.
+export const DEFAULT_ROOT = ".layerfs-tools"
+export const LEGACY_ROOT = ".magpie-layerfs"
+export function defaultRoot(home = homedir()) {
+  const root = join(home, DEFAULT_ROOT)
+  const legacy = join(home, LEGACY_ROOT)
+  if (existsSync(root)) return root
+  let st
+  try { st = lstatSync(legacy) } catch { return root }
+  if (st.isSymbolicLink()) return legacy
+  if (!st.isDirectory()) return root
+  try {
+    renameSync(legacy, root)
+  } catch {
+    // another host moved it first, or the move is refused: use what is there
+    return existsSync(root) ? root : legacy
+  }
+  try { symlinkSync(root, legacy, process.platform === "win32" ? "junction" : "dir") } catch { /* the new paths still work */ }
+  return root
+}
+
 // ---- sim backend ---------------------------------------------------------------
 
 export class SimBackend {
   kind = "sim"
 
   constructor(root) {
-    this.root = root || process.env.MAGPIE_LAYERFS_HOME || join(homedir(), ".magpie-layerfs")
+    this.root = root || process.env.MAGPIE_LAYERFS_HOME || defaultRoot()
     this.objectsDir = join(this.root, "store", "objects")
     this.projectsDir = join(this.root, "projects")
     this.workspacesDir = join(this.root, "workspaces")

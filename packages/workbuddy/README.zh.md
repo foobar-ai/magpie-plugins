@@ -107,7 +107,37 @@ WorkBuddy 的网关：中国版为 `https://www.codebuddy.cn/v2`，国际版为
 `Authorization: Bearer` 发送；请求携带 `X-Domain`、`X-Product: SaaS`、
 `X-IDE-Type: CodeBuddy`、`CodeBuddy/<version>` User-Agent 和会话 id，但不带
 账号登录的 `X-User-Id` 或企业请求头。API Key 绝不会发往 WorkBuddy 的
-OAuth 或账单端点。
+OAuth 或账单端点。API Key 的 Claude 模型会保留 Messages 路径：请求只把
+WorkBuddy 的 host 换成该版本的 CodeBuddy 网关，`/v1/messages` 不变。
+
+**WorkBuddy 中国版的 Claude 模型走 Anthropic Messages API**：`@ai-sdk/anthropic`，
+地址 `<endpoint>/v1/messages`（同样只支持流式）。2026-10-24 用 `/v3/config`
+的 `cli` agent 逐个模型实测，`claude-opus-5.5`、`claude-sonnet-5.5`、
+`claude-opus-5`、`claude-opus-4.8-1m` 在该路由正常回答；`glm-5.3` 和
+`deepseek-v4.1-flash` 返回 500，`gpt-5.5` 和 `kimi-k3-1` 返回 400，因此其他
+模型继续走 chat。WorkBuddy AI 没有这个路由（`/v1/messages` 对所有模型都是
+`404 Route Not Found`），所以它的模型都走 chat，Claude 模型也一样。
+
+Messages 请求按 Agent 发来的原样转发：不补默认 system 消息，不改写
+`max_completion_tokens`/`developer`，不重塑工具，也不为被拒的 system 提示词
+做移动——Claude Code 自己的提示词（包括计费行）会原样发出，而在 chat 上它
+会被 11128 拒绝。唯一会去掉的是没有 `signature` 的 `thinking` 块：从 chat
+（或其他 provider）开始的会话会带有这种块，一旦它与本路由产生的已签名块
+放在一起，WorkBuddy 会在每次尝试时以 11159 拒绝整个请求（“Invalid
+`signature` in `thinking` block … bound to a different conversation”）。
+已签名的块原样返回。它和 chat 一样携带 WorkBuddy 的请求头，包括相同的会话
+id 和轮次 id：`user` 消息里 `tool_result` 块中的工具结果，对应 chat 中的
+`role: "tool"` 消息。
+
+这条路由的重点是推理强度。chat 只带 `reasoning_effort`，而 WorkBuddy 的
+chat 端点无论该值是什么，回答长度都差不多（2026-10-24，`claude-opus-5.5`，
+同一问题各问四次：`low` 中位数 3884 个输出 token，`max` 5144，非档位值
+5715）。Messages 带 `output_config.effort`，`max` 会被真正执行：同一模型和
+问题各跑四次，中位数 30850，而 `low` 为 5748。因此 Messages 上的 Claude 模型
+即使 `/v3/config` 只到 `xhigh`，也会在档位里列出 `max`。
+
+`/v1/messages/count_tokens` **不提供服务**（404）。magpie 会把 count_tokens
+的 404 当作“没有计数器”（`unsupportedCount`），用自己的估算回答。
 
 每个聊天携带 WorkBuddy 的请求头：
 

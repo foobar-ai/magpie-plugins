@@ -44,6 +44,10 @@ over Anthropic's Messages API. Provider id: `zcode`.
   - It is kept as an account of its own, named `<email> (team)`, beside
     the account's own plan, so both can be used.
   - With no seat on a team's plan, it says so and signs in to nothing.
+  - The same ZCode session also reads the person's gift plans. Their
+    `<model>-Trial` entries and gift buckets appear beside the team's
+    models and allowance. Plain models spend the team plan; trial entries
+    spend the personal gift, with no fallback to the team on refusal.
 - **ZCode app's sign-in**
   - Uses the account the ZCode app on this computer is signed in to. For
     every request it reads ZCode's own credentials (`~/.zcode/v2`), so it
@@ -79,7 +83,11 @@ the ZCode app's sign-in (`refresh` then holds `"source": "zcode"`).
 ## How requests are routed
 
 Before each request, the plugin checks which plan the account is on, and
-asks again every 10 minutes:
+asks again every 10 minutes, and with every read of the usage card, so a
+plan bought, a gift claimed or a plan lapsed reaches the requests when the
+card shows it. A key whose plan list once reads no plan after reading one
+is asked again after a minute, and a Start Plan refusal on such a key reads
+the plans again on the next request:
 
 - If the key's account has a GLM Coding Plan
   (`/api/biz/subscription/list`), its requests go to that plan. A model

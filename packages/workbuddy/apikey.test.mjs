@@ -20,13 +20,16 @@ afterAll(() => {
 
 const KEY = "ck_test_key"
 const apiAuth = { type: "api", key: KEY }
+const CHAT_CN = "https://copilot.tencent.com/v2/chat/completions"
+const CHAT_AI = "https://www.workbuddy.ai/v2/chat/completions"
 const STREAM =
   'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'
 const answer = () => new Response(STREAM, { headers: { "content-type": "text/event-stream" } })
 
-// asked runs one chat through the plugin's api loader, collecting the calls
-// the loader made; the plugin defaults to the China build.
-async function asked({ plugin = WorkBuddyAuthPlugin, auth = apiAuth, reply = answer } = {}) {
+// asked runs one request through the plugin's api loader, collecting the
+// calls the loader made; the plugin defaults to the China build. The URL is
+// a model's own api.url, as the AI SDK gives it to the loader.
+async function asked({ plugin = WorkBuddyAuthPlugin, auth = apiAuth, reply = answer, url = CHAT_CN } = {}) {
   const calls = []
   globalThis.fetch = async (url, init) => {
     calls.push({ url: String(url instanceof Request ? url.url : url), headers: new Headers(init?.headers), body: init?.body })
@@ -43,7 +46,7 @@ async function asked({ plugin = WorkBuddyAuthPlugin, auth = apiAuth, reply = ans
       { role: "user", content: "Say ok." },
     ],
   })
-  const res = await loader.fetch(loader.baseURL + "/chat/completions", { method: "POST", body })
+  const res = await loader.fetch(url, { method: "POST", body })
   return { res, calls, loader, hooks }
 }
 
@@ -61,12 +64,18 @@ test("both builds offer a CodeBuddy API key method, with no exchange", async () 
 
 test("a key's chats go to that build's CodeBuddy gateway, not WorkBuddy's", async () => {
   const cn = await asked()
-  expect(cn.loader.baseURL).toBe("https://www.codebuddy.cn/v2")
+  expect(cn.loader.baseURL).toBe("")
   expect(cn.calls[0].url).toBe("https://www.codebuddy.cn/v2/chat/completions")
 
-  const ai = await asked({ plugin: WorkBuddyAIAuthPlugin })
-  expect(ai.loader.baseURL).toBe("https://www.codebuddy.ai/v2")
+  const ai = await asked({ plugin: WorkBuddyAIAuthPlugin, url: CHAT_AI })
+  expect(ai.loader.baseURL).toBe("")
   expect(ai.calls[0].url).toBe("https://www.codebuddy.ai/v2/chat/completions")
+})
+
+test("a Claude model's Messages path keeps /v1 on the key's gateway", async () => {
+  const { calls } = await asked({ url: "https://copilot.tencent.com/v1/messages" })
+  expect(calls[0].url).toBe("https://www.codebuddy.cn/v1/messages")
+  expect(calls[0].headers.get("x-api-key")).toBe(KEY)
 })
 
 test("a key is sent as X-Api-Key and as a bearer token, with the build's domain and client identity", async () => {
@@ -143,26 +152,29 @@ test("a key's models are the build's list, without asking /v3/config", async () 
   expect(models).toBe(list)
 })
 
-test("a browser sign-in still goes to WorkBuddy's own endpoint", async () => {
-  const hooks = await WorkBuddyAuthPlugin({ client: {} })
-  const loader = await hooks.auth.loader(async () => ({
+test("a sign-in leaves the URL to the model's own api: chat on /v2, Claude on /v1", async () => {
+  const signedIn = async () => ({
     type: "oauth",
     access: "access",
     refresh: "refresh",
     expires: Date.now() + 3600_000,
     uid: "u1",
-  }))
-  expect(loader.baseURL).toBe("https://copilot.tencent.com/v2")
+  })
+  const hooks = await WorkBuddyAuthPlugin({ client: {} })
+  const loader = await hooks.auth.loader(signedIn)
+  expect(loader.baseURL).toBe("")
+  const site = _internal.SITES.workbuddy
+  expect(_internal.modelOf(site, { id: "workbuddy" }, { id: "deepseek-v4.1-flash", name: "Deepseek" }).api.url).toBe(
+    "https://copilot.tencent.com/v2",
+  )
+  expect(_internal.modelOf(site, { id: "workbuddy" }, { id: "claude-opus-5.5", name: "Claude" }).api.url).toBe(
+    "https://copilot.tencent.com/v1",
+  )
 
   const ai = await WorkBuddyAIAuthPlugin({ client: {} })
-  const aiLoader = await ai.auth.loader(async () => ({
-    type: "oauth",
-    access: "access",
-    refresh: "refresh",
-    expires: Date.now() + 3600_000,
-    uid: "u1",
-  }))
-  expect(aiLoader.baseURL).toBe("https://www.workbuddy.ai/v2")
+  const aiLoader = await ai.auth.loader(signedIn)
+  expect(aiLoader.baseURL).toBe("")
+  expect(_internal.nativeOf(_internal.SITES["workbuddy-ai"], "claude-opus-5.5")).toBe(false)
 })
 
 test("a key that is empty is refused before anything is sent", async () => {
