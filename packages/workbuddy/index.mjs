@@ -64,6 +64,10 @@ const SITES = {
     id: "workbuddy",
     name: "WorkBuddy",
     endpoint: "https://copilot.tencent.com",
+    // where a CodeBuddy API key goes: the plan's own gateway, not
+    // WorkBuddy's OAuth endpoint (the two builds' keys are not
+    // interchangeable: a ck_ key is refused by www.codebuddy.ai)
+    apiEndpoint: "https://www.codebuddy.cn",
     authID: "workbuddy-desktop",
     platform: "workbuddy",
     ai: false,
@@ -73,6 +77,7 @@ const SITES = {
     id: "workbuddy-ai",
     name: "WorkBuddy AI",
     endpoint: "https://www.workbuddy.ai",
+    apiEndpoint: "https://www.codebuddy.ai",
     authID: "workbuddy-desktop-ai",
     platform: "workbuddy-ai",
     ai: true,
@@ -99,9 +104,16 @@ function textOnly(site, model) {
 }
 
 const NPM = "@ai-sdk/openai-compatible"
+// API_KEY_VERSION is the CodeBuddy CLI release an API-key request gives
+// itself as; its gateway reads the client identity, so keep it in step with
+// the CLI (the token's own validity doesn't depend on it).
+const API_KEY_VERSION = "2.118.2"
 const hex = () => randomBytes(16).toString("hex")
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const api = (site) => site.endpoint + "/v2"
+// apiKeyApi is where a CodeBuddy API key's chats go: that build's own
+// gateway, not the WorkBuddy endpoint OAuth uses.
+const apiKeyApi = (site) => site.apiEndpoint + "/v2"
 
 // ---- WorkBuddy's API ------------------------------------------------------
 
@@ -279,6 +291,29 @@ function sign(site, a, headers) {
   headers.set("X-IDE-Name", "WorkBuddy")
   headers.set("X-IDE-Version", UA_VERSION)
   for (const [k, v] of Object.entries(enterpriseHeaders(a))) headers.set(k, v)
+  if (!site.ai) return
+  headers.set("X-Agent-Type", "main")
+}
+
+// signApiKey sets on headers what a CodeBuddy CLI sends with an API key:
+// the key itself as X-Api-Key (the official header) and, as the gateway
+// also takes it, as a bearer token; the build's own domain; and the
+// client identity its gateway reads. A key is not an account's token, so
+// none of the OAuth fields (X-User-Id, the enterprise ids) are set.
+function signApiKey(site, a, headers) {
+  const key = typeof a?.key === "string" ? a.key.trim() : ""
+  headers.set("X-Api-Key", key)
+  headers.set("Authorization", "Bearer " + key)
+  headers.set("X-Domain", new URL(apiKeyApi(site)).host)
+  headers.set("X-Product", "SaaS")
+  headers.set("X-IDE-Type", "CodeBuddy")
+  headers.set("X-IDE-Name", "CodeBuddy")
+  headers.set("X-IDE-Version", API_KEY_VERSION)
+  headers.set("X-Product-Version", API_KEY_VERSION)
+  headers.set("User-Agent", "CodeBuddy/" + API_KEY_VERSION)
+  headers.set("X-Requested-With", "XMLHttpRequest")
+  headers.set("X-Agent-Intent", "craft")
+  headers.set("X-Agent-Purpose", "conversation")
   if (!site.ai) return
   headers.set("X-Agent-Type", "main")
 }
@@ -1740,6 +1775,65 @@ function replyAfterTools(body) {
   return JSON.stringify(b)
 }
 
+// apiKeyLoader is the loader of a CodeBuddy API key. Requests are shaped as
+// a sign-in's are, but nothing is renewed: a 401 goes on as it is, so magpie
+// marks the account and the user replaces the key. The key is never sent to
+// WorkBuddy's OAuth or billing endpoints, and no OAuth identity is set.
+function apiKeyLoader(site, getAuth, state) {
+  return {
+    baseURL: apiKeyApi(site),
+    apiKey: "",
+    async fetch(input, init) {
+      const auth = await getAuth()
+      const key = typeof auth?.key === "string" ? auth.key.trim() : ""
+      if (auth?.type !== "api" || !key) throw new Error(`${site.name}'s CodeBuddy API key isn't set`)
+      const req = input instanceof Request ? input : null
+      const headers = new Headers(init?.headers ?? req?.headers)
+      headers.delete("authorization")
+      headers.delete("x-api-key")
+      headers.delete("content-length")
+      const session = sessionOf(headers)
+      signApiKey(site, { ...auth, key }, headers)
+      let body = init?.body
+      if (body === undefined && req) body = await req.clone().text()
+      body = withSystem(body)
+      const fit = fitted(body)
+      body = normalizeToolChoice(fit.body)
+      attend(headers, body, session)
+      const post = (b) =>
+        fetch(req ? req.url : input, { ...init, method: init?.method ?? req?.method, headers, body: b })
+      const model = chatOf(body)?.model
+      const sysKey = systemKey(body)
+      // a system prompt this build refused before goes as the user's words
+      // at once, as it does for a sign-in (see systemAsUser)
+      if (sysKey && state.refusedSystems.has(sysKey)) body = systemAsUser(body) ?? body
+      const shaped = (b) => (state.endsAfterTools.has(model) ? replyAfterTools(b) ?? b : b)
+      let res = await post(shaped(body))
+      if (res.status === 400) {
+        let text = await res.text()
+        const moved = REFUSED.test(text) && sysKey && !state.refusedSystems.has(sysKey) ? systemAsUser(body) : null
+        if (moved) {
+          state.refusedSystems.add(sysKey)
+          if (state.refusedSystems.size > 256) state.refusedSystems.delete(state.refusedSystems.values().next().value)
+          body = moved
+          res = await post(shaped(body))
+          if (res.status === 400) text = await res.text()
+        }
+        const again = res.status === 400 && !state.endsAfterTools.has(model) && AFTER_TOOLS_REFUSED.test(text) ? replyAfterTools(body) : null
+        if (again) {
+          state.endsAfterTools.add(model)
+          res = await post(again)
+        } else if (res.status === 400) {
+          res = new Response(text, { status: res.status, statusText: res.statusText, headers: res.headers })
+        }
+      }
+      // an API key can't be renewed: a 401 is magpie's to mark
+      if (res.status === 401) return res
+      return res.status >= 400 ? explained(res) : kept(await renamed(res, fit.names), "kept")
+    },
+  }
+}
+
 function makePlugin(site) {
   // the models of this site that refused tool results then the user's
   // message, for this run: their next chats go with replyAfterTools at once
@@ -1791,6 +1885,7 @@ function makePlugin(site) {
       refresh: (auth) => refreshed(site, auth),
       async loader(getAuth) {
         const auth = await getAuth()
+        if (auth?.type === "api") return apiKeyLoader(site, getAuth, { endsAfterTools, refusedSystems })
         if (auth?.type !== "oauth") return {}
         return {
           baseURL: api(site),
@@ -1888,6 +1983,10 @@ function makePlugin(site) {
       // an account lapsed nor cleared it, but for a 401 (gone, below)
       async usage(getAuth) {
         const auth = await getAuth()
+        // A CodeBuddy API key has no documented meter: WorkBuddy's billing
+        // endpoints take OAuth tokens only. No error, so magpie doesn't mark
+        // the account; just no windows to show.
+        if (auth?.type === "api") return { plan: "CodeBuddy API key", windows: [], signIn: "kept" }
         if (auth?.type !== "oauth" || !(auth.access || auth.source)) return { error: "not signed in", signIn: "kept" }
         try {
           let a = await current(site, client, auth)
@@ -1950,6 +2049,13 @@ function makePlugin(site) {
           type: "oauth",
           label: `${site.name} desktop's sign-in`,
           authorize: async () => desktopSignIn(site),
+        },
+        {
+          // the build's CodeBuddy API key: magpie keeps it as an api auth
+          // and the loader sends it; nothing is exchanged here
+          type: "api",
+          label: "CodeBuddy API key",
+          placeholder: site.ai ? "sk_… / ck_…" : "ck_…",
         },
       ],
     },
@@ -2046,4 +2152,4 @@ export const WorkBuddyAuthPlugin = makePlugin(SITES.workbuddy)
 export const WorkBuddyAIAuthPlugin = makePlugin(SITES["workbuddy-ai"])
 
 // for tests
-export const _internal = { systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf }
+export const _internal = { systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf, apiKeyApi, signApiKey, apiKeyLoader, API_KEY_VERSION }

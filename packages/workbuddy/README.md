@@ -1,12 +1,15 @@
 # @magpie-community/opencode-workbuddy-auth
 
-Signs in to the plans of WorkBuddy, Tencent's desktop agent from CodeBuddy.
-It has one provider for each of WorkBuddy's two builds:
+[中文说明](./README.zh.md)
 
-| Provider id | Build | API |
-|---|---|---|
-| `workbuddy` | WorkBuddy, the China build (CodeBuddy plan) | `https://copilot.tencent.com/v2` |
-| `workbuddy-ai` | WorkBuddy AI, the international build | `https://www.workbuddy.ai/v2` |
+Signs in to the plans of WorkBuddy, Tencent's desktop agent from CodeBuddy,
+with a WorkBuddy account or with a CodeBuddy API key. It has one provider for
+each of WorkBuddy's two builds:
+
+| Provider id | Build | WorkBuddy API (account) | CodeBuddy API (API key) |
+|---|---|---|---|
+| `workbuddy` | WorkBuddy, the China build (CodeBuddy plan) | `https://copilot.tencent.com/v2` | `https://www.codebuddy.cn/v2` |
+| `workbuddy-ai` | WorkBuddy AI, the international build | `https://www.workbuddy.ai/v2` | `https://www.codebuddy.ai/v2` |
 
 The package exports `WorkBuddyAuthPlugin` (`workbuddy`) and
 `WorkBuddyAIAuthPlugin` (`workbuddy-ai`).
@@ -26,6 +29,21 @@ The package exports `WorkBuddyAuthPlugin` (`workbuddy`) and
 
   WorkBuddy 5.6 and later keep the sign-in encrypted, which only the app
   opens, so this way fails there and says so: use the browser sign-in.
+- **CodeBuddy API key.** Paste a key issued for the same build. Get it from
+  the build's own console:
+  - China: <https://copilot.tencent.com/profile/> (`ck_…`)
+  - International: <https://www.codebuddy.ai/profile/keys> (`sk_…` / `ck_…`)
+
+  The key is kept by magpie (or OpenCode) as an `api` auth,
+  `{"type": "api", "key": "…"}`, and sent on every request; this plugin
+  never writes it anywhere. A key cannot be renewed: when a build answers
+  401, replace the key. A key from one build is not accepted by the other
+  (a `ck_…` key is refused by `www.codebuddy.ai`).
+
+  An API-key account reads no model list and no credit balance: those are
+  the sign-in's (`GET /v3/config`, WorkBuddy's billing endpoints, which
+  take OAuth tokens only). The static model list below is used, and the
+  usage card shows no windows rather than an error.
 
 A browser sign-in is kept as an OpenCode `oauth` auth: the access and
 refresh tokens, their expiry, the user id and the domain; desktop's as a
@@ -72,10 +90,38 @@ failed renewal for another reason, or a bare 401 without `invalid_token`,
 leaves the account as it is; a desktop sign-in is never marked. A 401
 after a renewal takes a mark off (`renewed`).
 
+## In magpie
+
+Add the folder (or the package) once, then sign in on the provider you use:
+
+```bash
+magpie plugin add ./packages/workbuddy      # or the package name, once published
+magpie plugin login workbuddy               # choose "CodeBuddy API key", then paste ck_…
+magpie plugin                               # workbuddy (WorkBuddy, N models)  signed in
+magpie provider test workbuddy              # one small request, on each API
+magpie quota                                # a key has no windows: the card is empty
+```
+
+Then point an agent at `workbuddy/<model>` or `workbuddy-ai/<model>`. In the
+magpie window: Plugins → Add plugin → the folder, then sign in on that
+provider's row with **CodeBuddy API key**.
+
+A folder plugin is loaded as it is by every terminal command; in the window,
+switch it off and on after changing its source.
+
 ## Requests
 
 Chats are chat completions (`@ai-sdk/openai-compatible`) at `<API>/chat/completions`.
 They are streamed only; WorkBuddy refuses a chat that isn't.
+
+With a CodeBuddy API key the chats go to that build's CodeBuddy gateway
+instead of WorkBuddy's: `https://www.codebuddy.cn/v2` for the China build,
+`https://www.codebuddy.ai/v2` for the international one. The key is sent as
+`X-Api-Key` (the official header) and as `Authorization: Bearer`; the request
+carries `X-Domain`, `X-Product: SaaS`, `X-IDE-Type: CodeBuddy`, a
+`CodeBuddy/<version>` User-Agent and the conversation ids, but none of a
+sign-in's `X-User-Id` or enterprise headers. An API key is never sent to
+WorkBuddy's OAuth or billing endpoints.
 
 Each chat carries WorkBuddy's headers:
 - `Authorization`, `X-User-Id`, `X-Domain`, `X-Product: SaaS`, `X-IDE-Type: WorkBuddy`;
@@ -157,6 +203,9 @@ gives its CLI agent (`GET /v3/config`), with their context, image input and
 reasoning levels. Until then, or if WorkBuddy doesn't answer, the list below
 is used.
 
+A CodeBuddy API key always uses the list below: `/v3/config` is read with a
+sign-in's token, and a key's plan need not have the same ids.
+
 `workbuddy`:
 - Auto
 - Hy4 preview, Hy3, Hy3-X
@@ -191,6 +240,11 @@ many: `runsOut`), from the paid and free package lists WorkBuddy's own
 client reads. The daily Free Plan slice isn't counted: it ends at the same
 midnight on every account. magpie's smart routing spends the account whose
 credits run out first.
+
+A CodeBuddy API key has no usage read: WorkBuddy's billing endpoints take
+OAuth tokens only, and a key has no documented meter. The plugin answers
+with no windows and no error, so magpie neither marks the account nor
+reports a balance it can't know.
 
 An enterprise (team) account's resource summary lists no packages. Its
 credits are read from the enterprise meter
@@ -241,3 +295,48 @@ magpie's built-in WorkBuddy does more than this package:
 OpenCode's plugin API has no place for these.
 
 Credit multipliers accept the international catalog's `x0.34 credits` text as well as `x0.34`. An empty credits value (for example Auto) stays unknown, never free.
+
+## Publishing to npm
+
+The package publishes straight from this folder; there is no build step.
+
+1. Choose where it goes:
+   - **Upstream (recommended for a community plugin).** Open a PR against
+     `magpie-community/plugins` adding this folder under
+     `packages/workbuddy`. A version bump on `main` publishes under
+     `@magpie-community`, and every magpie updates it automatically. Only
+     the community's maintainers can publish to that scope.
+   - **Your own scope.** Change `name` to
+     `@<your-scope>/opencode-workbuddy-auth` (or an unscoped name) and
+     `repository` to your fork. The npm scope must exist and your user must
+     be allowed to publish to it.
+2. Bump `version` (SemVer): a fix is a patch bump; a new way to sign in is
+   a minor one.
+3. Check what would be published. `files` ships only `index.mjs` and
+   `README.md`, so the tests stay out:
+   ```bash
+   cd packages/workbuddy
+   npm pack --dry-run --json
+   ```
+4. Log in and publish:
+   ```bash
+   npm login
+   npm publish --access public
+   ```
+   `--access public` is required for a scoped package; an unscoped one is
+   public by default.
+5. Verify, then install it by name:
+   ```bash
+   npm view @<scope>/opencode-workbuddy-auth version
+   magpie plugin add @<scope>/opencode-workbuddy-auth
+   ```
+
+For tokenless releases, configure npm trusted publishing (OIDC) for the
+package and repository workflow, as `magpie-community/plugins` does. The
+first release still needs a token; trusted publishing can be attached after
+it.
+
+Never commit an API key, an `auth.json`/`plugin-auth.json`, or a `.npmrc`
+holding a token. This package has no runtime dependencies and no install
+scripts, which is what lets magpie install it with `bun add` without running
+anything.

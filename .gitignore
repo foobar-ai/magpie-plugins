@@ -1,3 +1,5 @@
 node_modules/
 .sandbox/
+tmp/
+.codebuddy/plans/
 *.log
