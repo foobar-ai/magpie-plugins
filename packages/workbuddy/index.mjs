@@ -1092,6 +1092,41 @@ function objectRoot(ps, root = ps, depth = 0) {
   return true
 }
 
+// Kimi (kimi-k3.1-pro) answers 400 "Invalid request parameters" to a oneOf
+// that has no type, at the root of a $ref's target or deeper, even when every
+// branch is an object (congee949, #378: dsh's REA tools, on workbuddy and
+// workbuddy-ai alike; a "type": "object" beside it is taken). typeUnions gives
+// such a oneOf type "object" when each branch is typed object itself or
+// through a chain of local $refs, and changes nothing else: a union of other
+// or mixed types, an anyOf, or a $ref that is missing, external or circular
+// is left as it came. It reports whether it changed anything.
+function typeUnions(s, root = s, depth = 0) {
+  if (!s || typeof s !== "object" || Array.isArray(s) || depth > 64) return false
+  let changed = false
+  if (!("type" in s) && Array.isArray(s.oneOf) && s.oneOf.length && s.oneOf.every((b) => objectBranch(root, b))) {
+    s.type = "object"
+    changed = true
+  }
+  for (const k of SUB_ONE) if (typeUnions(s[k], root, depth + 1)) changed = true
+  for (const k of SUB_LIST) for (const v of Array.isArray(s[k]) ? s[k] : []) if (typeUnions(v, root, depth + 1)) changed = true
+  for (const k of SUB_MAP) {
+    const m = s[k]
+    if (!m || typeof m !== "object" || Array.isArray(m)) continue
+    for (const v of Object.values(m)) if (typeUnions(v, root, depth + 1)) changed = true
+  }
+  return changed
+}
+
+// objectBranch says whether b is typed object, itself or where its local
+// $refs lead; a $ref seen before on the way is a cycle, and not.
+function objectBranch(root, b, seen = []) {
+  if (!b || typeof b !== "object" || Array.isArray(b)) return false
+  if ("type" in b) return b.type === "object"
+  if (typeof b.$ref !== "string" || seen.includes(b.$ref) || seen.length > 16) return false
+  const t = localRef(root, b)
+  return t !== b && objectBranch(root, t, [...seen, b.$ref])
+}
+
 // fitTools mends b's function tools in place: their parameters (fitSchema,
 // fitShape, objectRoot) and names. It reports whether it changed anything,
 // and the names it gave, each to the name the client knows (ours), so that the
@@ -1125,6 +1160,7 @@ function fitTools(b) {
     }
     if (fitSchema(fn.parameters)) changed = true
     if (fitShape(fn.parameters)) changed = true
+    if (typeUnions(fn.parameters)) changed = true
     if (objectRoot(fn.parameters)) changed = true
   }
   if (theirs.size && Array.isArray(b.messages)) {
@@ -1615,9 +1651,11 @@ const compact = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/
 // usageOf is the account's credits, from its resource summary: the plan's
 // credits used against what the cycle grants, as magpie's built-in said —
 // the count itself too (amount of limit, in credits), for magpie to say it
-// as used or left beside the share (magpie#659).
+// as used or left beside the share (magpie#659). The free plan is said as a
+// plan: "Free" alone beside the account read as the model being free, and
+// routing as preferring it for that (#337).
 function usageOf(sum, plan) {
-  const out = { plan: plan || (sum?.IsPaidUser ? "Pro" : "Free"), windows: [] }
+  const out = { plan: plan || (sum?.IsPaidUser ? "Pro" : "Free plan"), windows: [] }
   let total = 0, used = 0
   for (const p of sum?.Packages ?? []) {
     total += capacity(p?.CycleTotalCapacity)
@@ -2379,4 +2417,4 @@ export const WorkBuddyAuthPlugin = makePlugin(SITES.workbuddy)
 export const WorkBuddyAIAuthPlugin = makePlugin(SITES["workbuddy-ai"])
 
 // for tests
-export const _internal = { systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, answeredBefore, nativeOf, modelOf, configModels, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM, apiKeyApi, apiKeyUrl, signApiKey, apiKeyLoader, API_KEY_VERSION }
+export const _internal = { typeUnions, systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, answeredBefore, nativeOf, modelOf, configModels, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM, apiKeyApi, apiKeyUrl, signApiKey, apiKeyLoader, API_KEY_VERSION }

@@ -951,6 +951,42 @@ function taskOf(sid, chat, now = Date.now()) {
   return t
 }
 
+// Qoder CN's kmodel (Kimi K3.1 Pro) fails a chat whose tools hold a oneOf
+// with no type, even of objects only, and takes it with "type": "object"
+// beside it (congee949, #378: dsh's REA tools, a 502 here). typedUnions is
+// the schema with each such oneOf typed object when each branch is typed
+// object itself or through a chain of local $refs; nothing else changes,
+// and the caller's own schema is not touched.
+const SUB_ONE = ["items", "additionalItems", "unevaluatedItems", "contains", "not", "if", "then", "else", "propertyNames", "additionalProperties", "unevaluatedProperties"]
+const SUB_LIST = ["anyOf", "oneOf", "allOf", "prefixItems"]
+const SUB_MAP = ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"]
+function typedUnions(schema) {
+  if (!schema || typeof schema !== "object") return schema
+  const root = structuredClone(schema)
+  const isObj = (v) => v && typeof v === "object" && !Array.isArray(v)
+  const target = (ref) => {
+    if (!ref.startsWith("#/")) return undefined
+    let at = root
+    for (const k of ref.slice(2).split("/")) at = at?.[k.replaceAll("~1", "/").replaceAll("~0", "~")]
+    return isObj(at) ? at : undefined
+  }
+  const object = (b, seen = []) => {
+    if (!isObj(b)) return false
+    if ("type" in b) return b.type === "object"
+    if (typeof b.$ref !== "string" || seen.includes(b.$ref) || seen.length > 16) return false
+    return object(target(b.$ref), [...seen, b.$ref])
+  }
+  const walk = (s, depth) => {
+    if (!isObj(s) || depth > 64) return
+    if (!("type" in s) && Array.isArray(s.oneOf) && s.oneOf.length && s.oneOf.every((b) => object(b))) s.type = "object"
+    for (const k of SUB_ONE) walk(s[k], depth + 1)
+    for (const k of SUB_LIST) for (const v of Array.isArray(s[k]) ? s[k] : []) walk(v, depth + 1)
+    for (const k of SUB_MAP) if (isObj(s[k])) for (const v of Object.values(s[k])) walk(v, depth + 1)
+  }
+  walk(root, 0)
+  return root
+}
+
 // qoderBody is the plaintext agent_chat_generation takes for a chat
 // completion request, for model m, in the session the agent named (named,
 // "" when none) and the task it is a call of (taskOf's, a new one when
@@ -988,7 +1024,7 @@ function qoderBody(chat, m, named = "", task, site) {
   if (tools.length)
     body.tools = tools.map((t) => ({
       type: "function",
-      function: { name: t.function.name, description: t.function.description ?? "", parameters: t.function.parameters ?? { type: "object", properties: {} } },
+      function: { name: t.function.name, description: t.function.description ?? "", parameters: typedUnions(t.function.parameters) ?? { type: "object", properties: {} } },
     }))
   return body
 }
@@ -2585,4 +2621,4 @@ export async function QwenWorkEnterpriseAuthPlugin({ client }) {
 export const protocol = { makePlugin, deviceSignIn, openapi, siteOf }
 
 // for tests
-export const _internal = { campaignRuntime, RUNTIMES, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, qoderMessages, cacheMarked, sessionOf, namedSession, taskOf, TASKS, TASK_MAX, TASK_IDLE, SESSION, SITES, decodeBody, events, QUEUE, queueState }
+export const _internal = { typedUnions, campaignRuntime, RUNTIMES, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, qoderMessages, cacheMarked, sessionOf, namedSession, taskOf, TASKS, TASK_MAX, TASK_IDLE, SESSION, SITES, decodeBody, events, QUEUE, queueState }
